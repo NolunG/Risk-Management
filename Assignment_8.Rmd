@@ -1,0 +1,374 @@
+---
+title: "Assignment_8"
+author: "Maharshi Vyas"
+date: "30/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Importing Libraries
+```{r}
+library(dplyr)
+library(data.table)
+library(haven)
+library(tidyverse)
+library(tidyquant)
+library(tidyr)
+library(lubridate)
+library(naniar)
+library(readxl)
+library(plotly)
+library(scales)
+library(fredr)
+library(openxlsx)
+library(fredr)
+library(zoo)
+library(frenchdata)
+library(NMOF)
+library(datetimeutils)
+library(lme4)
+library(geckor)
+library(tibbletime)
+library(zeallot)
+library(sandwich)
+library(lmtest)
+library(broom)
+library(shiny)
+library(plotly)
+library(pracma)
+library(tseries)
+library(rugarch)
+```
+
+## Plotting Function
+```{r}
+
+plot_data_var = function(master_data_join, datatype) {
+  len <- dim(master_data_join)
+  plot <- master_data_join %>% plot_ly()
+  
+  for(i in seq_along(master_data_join)) {
+    if (i<2) {
+      next 
+    } else  {  
+      x <- plot %>% add_trace(x = ~DATE, y=master_data_join[[i]] ,mode = 'bar', name=colnames(master_data_join)[i])
+    }
+    plot <- x
+  }
+  
+  plot %>% 
+    layout(title     = datatype,
+         barmode   = 'relative',
+         #hovermode = 'compare',
+         xaxis     = list(title=''),
+         margin    = list(l = 75, r = 75, b = 50, t = 50, pad = 4),
+         xaxis     = list(title = ""),
+         yaxis     = list(side = 'left', 
+                       title = "Portfolio Cumulative Performance", 
+                       showgrid = FALSE, 
+                       zeroline = TRUE, 
+                       color = 'green'),
+         legend = list(traceorder = 'reversed',orientation = "h"))
+}
+
+```
+
+## Reading Daily CSRP Data, Sampling, Saving Back
+Generating sample opf 10 years window for analysis and sample 250 companies to 
+```{r}
+# set.seed(903559177)
+# starting_year <- sample(1980:2010,1)
+# print(starting_year)
+# 
+# path = "C:\\Users\\Maharshi Vyas\\Downloads\\dsf_new.csv"
+# 
+# daily_data <- fread(path, select=c('DATE','CUSIP', 'PRC', 'RET','RETX','VWRETD'))
+# 
+# # This is basic cleaning, typing date correctly, and changing price to absolute value as mentioned in assginment document
+# daily_data <- daily_data %>% 
+#             tibble() %>%
+#             filter(DATE >= starting_year*10000, DATE <= (starting_year+11)*10000) %>%
+#             mutate(RET = as.numeric(RET)) %>%
+#             mutate(PRC = ABS(PRC),
+#                   DATE = as.Date(parse_date_time(DATE, orders = "Ymd")))
+# 
+# set.seed(903559177)
+# selected_companies <- daily_data %>%
+#                   select(c(CUSIP)) %>%
+#                   distinct() %>%
+#                   sample_n(250)
+# 
+# daily_data <- daily_data %>% 
+#           inner_join(selected_companies) 
+# 
+# write.csv(daily_data, "D:\\Data\\daily_250_10_years.csv")
+# rm(daily_data)
+```
+
+## Reading Sampled Stocks 
+```{r}
+
+daily_data <- fread( "D:\\Data\\daily_250_10_years.csv",header = T) %>% 
+                  tibble()
+
+daily_data_2010 <- fread( "D:\\Data\\daily_250_2010_years.csv",header = T) %>% 
+                  tibble()
+## My random 5 copmanies
+set.seed(10)
+selected_companies <- daily_data %>%
+                  select(c(CUSIP)) %>%
+                  distinct() %>%
+                  sample_n(5)
+
+daily_data <- daily_data %>%
+            mutate(month = floor_date(DATE, unit = "month")) %>%
+            mutate(ret_positive = ifelse(RET>0,RET,0),
+                   ret_negative = ifelse(RET<0,RET,0),
+                   mkt_ret_positive = ifelse(VWRETD>0,VWRETD,0),
+                   mkt_ret_negative = ifelse(VWRETD<0,VWRETD,0),
+                   ) %>%
+            drop_na(RET) %>%
+            rename(mkt_ret = VWRETD)
+
+daily_data_2010 <- daily_data_2010 %>%
+            mutate(month = floor_date(DATE, unit = "month")) %>%
+            mutate(ret_positive = ifelse(RET>0,RET,0),
+                   ret_negative = ifelse(RET<0,RET,0),
+                   mkt_ret_positive = ifelse(VWRETD>0,VWRETD,0),
+                   mkt_ret_negative = ifelse(VWRETD<0,VWRETD,0),
+                   ) %>%
+            drop_na(RET) %>%
+            rename(mkt_ret = VWRETD)
+
+set.seed(10)
+selected_companies_2010 <- daily_data_2010 %>%
+                  select(c(CUSIP)) %>%
+                  distinct() %>%
+                  sample_n(5)
+
+```
+
+## Calculating Betas: 8.1
+```{r}
+
+calculate_beta <- function(stock_returns, market_signed_returns, market_return) {
+    dot(stock_returns,market_signed_returns)/sum(market_return**2)
+}
+
+co_skewness <- function(stock_return, market_return, total) {
+   if(sum(stock_return**2) == 0)
+      return(0)
+    
+    dot(stock_return, market_return**2)/(sqrt(sum(stock_return**2)/total)*sum(market_return**2))
+}
+
+co_kurtosis <- function(stock_return, market_return, total) {
+    if(sum(stock_return**2) == 0)
+      return(0)
+         
+    dot(stock_return, market_return**3)/(sqrt(sum(stock_return**2)/total)*(sum(market_return**2)**1.5))
+}
+
+
+monthly_betas <- daily_data %>%
+            group_by(month, CUSIP) %>%
+            summarise(n = n(),
+                      beta_n = calculate_beta(ret_negative,mkt_ret_negative,mkt_ret),
+                      beta_p = calculate_beta(ret_positive,mkt_ret_positive,mkt_ret),
+                      beta_mn = calculate_beta(ret_positive,mkt_ret_negative,mkt_ret),
+                      beta_mp = calculate_beta(ret_negative,mkt_ret_positive,mkt_ret),
+                      beta_c = calculate_beta(RET,mkt_ret,mkt_ret),
+                      down_beta = calculate_beta(RET,mkt_ret_negative,mkt_ret_negative),
+                      up_beta = calculate_beta(RET,mkt_ret_positive,mkt_ret_positive),
+                      coskewness = co_skewness(RET,mkt_ret,n),
+                      cokurtosis = co_kurtosis(RET,mkt_ret,n)) %>%
+            mutate(beta = beta_n + beta_p + beta_mn + beta_mp,
+                   check = beta-beta_c)  ## check verifies if beta = beta_c, just to confirm our calculations are correct. All values are                                               ##coming appoximately 0, hence our values are correct
+                   
+
+
+
+#beta_check = calculate_beta())
+
+```
+## Value-At-Risk: 8.2
+```{r}
+
+returnTop5 <- function(returns) {
+  quantile(returns, probs=c(0.01), na.rm = TRUE)
+}
+
+expected_shortfall <- function(returns) {
+  val <- quantile(returns, probs=c(0.01), na.rm = TRUE)
+  #returns %>% tibble() %>% filter(returns > )
+  mean(returns[returns<val], na.rm = TRUE)
+}
+
+returnTop1 <- function(returns) {
+  quantile(returns, probs=c(0.99))
+}
+
+
+daily_portfolio <- daily_data %>%
+            arrange(DATE) %>%
+            group_by(DATE) %>%
+            summarise(n = n(),portfolio_returns = mean(RET,na.rm=TRUE)) %>%
+            ungroup() %>%
+            mutate(
+                   VaR_5 = rollify(returnTop5,100)(portfolio_returns),
+                   portfolio_value = 250000000*cumprod(1+portfolio_returns),
+                   cumulative_return = cumprod(1+portfolio_returns),
+                   VaR_value = VaR_5*portfolio_value,
+                   portfolio_shortfall = rollify(expected_shortfall,100)(portfolio_returns))
+
+daily_portfolio
+## Initial Values will be NA because of rolling
+
+daily_portfolio_2010 <- daily_data_2010 %>%
+            arrange(DATE) %>%
+            group_by(DATE) %>%
+            summarise(n = n(),portfolio_returns = mean(RET,na.rm=TRUE)) %>%
+            ungroup() %>%
+            mutate(
+                   VaR_5 = rollify(returnTop5,100)(portfolio_returns),
+                   portfolio_value = 250000000*cumprod(1+portfolio_returns),
+                   cumulative_return = cumprod(1+portfolio_returns),
+                   VaR_value = VaR_5*portfolio_value,
+                   portfolio_shortfall = rollify(expected_shortfall,100)(portfolio_returns))
+
+daily_portfolio_2010
+## Initial Values will be NA because of rolling
+
+```
+
+```{r}
+
+
+# mod_fit[0]
+# 
+# coef <- coef(mod_fit)
+# coef[3]
+# coef <- coef %>% tibble()
+# val <- 2
+# val
+# garchvol <- sigma(mod_fit) %>% tibble()
+# garchvol
+# spec           <- getspec(mod_fit)
+# setfixed(spec) <- as.list(coef(mod_fit))
+# garchforecast1 <- ugarchforecast(spec, n.ahead = 1, n.roll = 1,data = daily_portfolio$portfolio_returns, out.sample = 2)
+# 
+# garchforecast1
+```
+## Volatility-modeling: Assignment 8.3
+## Risk Metric Method
+```{r}
+volatility <- function(returns) {
+  var(returns, na.rm=TRUE)
+}
+
+plotForSelectedCompanies <- function(daily_predicted_vol, selected_companies) {
+  daily_predicted_vol %>%                 
+        inner_join(selected_companies) %>%
+        pivot_wider(names_from = CUSIP, values_from = vol_predicted) %>%
+        plot_data_var("Annualized Volatilities")
+}
+
+risk_metric_vols <- daily_data %>%
+          arrange(DATE) %>%
+          group_by(CUSIP) %>%
+          filter(n()>100) %>%
+          mutate(VaR_5 = rollify(returnTop5,100)(RET),
+                 curr_vol = rollify(volatility,100)(RET),
+                 vol_predicted_risk_metrics = lag(curr_vol)*0.94 + 0.06*lag(RET)*lag(RET),
+                 vol_predicted_risk_metrics = vol_predicted_risk_metrics*sqrt(252)) %>%   ## Converting to annualized volatility
+          ungroup() %>%
+          select(c(DATE,CUSIP,vol_predicted_risk_metrics)) %>%
+          rename(vol_predicted = vol_predicted_risk_metrics)
+          
+plotForSelectedCompanies(risk_metric_vols, selected_companies)
+
+risk_metric_vols_2010 <- daily_data_2010 %>%
+          arrange(DATE) %>%
+          group_by(CUSIP) %>%
+          filter(n()>100) %>%
+          mutate(VaR_5 = rollify(returnTop5,100)(RET),
+                 curr_vol = rollify(volatility,100)(RET),
+                 vol_predicted_risk_metrics = lag(curr_vol)*0.94 + 0.06*lag(RET)*lag(RET),
+                 vol_predicted_risk_metrics = vol_predicted_risk_metrics*sqrt(252)) %>%   ## Converting to annualized volatility
+          ungroup() %>%
+          select(c(DATE,CUSIP,vol_predicted_risk_metrics)) %>%
+          rename(vol_predicted = vol_predicted_risk_metrics)
+          
+plotForSelectedCompanies(risk_metric_vols_2010, selected_companies_2010)
+
+```
+## GARCH Supporting Functions
+```{r}
+garch_omega <-function(returns) {
+  
+  mod_specify = ugarchspec(mean.model = list(armaOrder =c(1,0)), variance.model = list(model = "sGARCH",garchOrder=c(1,1)),distribution.model = "norm")
+  mod_fit = ugarchfit(data = returns, spec = mod_specify, out.sample =20)
+  as.list(coef(mod_fit)[3])
+}
+
+
+garch_alpha <-function(returns) {
+  
+  mod_specify = ugarchspec(mean.model = list(armaOrder =c(1,0)), variance.model = list(model = "sGARCH",garchOrder=c(1,1)),distribution.model = "norm")
+  mod_fit = ugarchfit(data = returns, spec = mod_specify, out.sample =20)
+  as.list(coef(mod_fit)[4])
+}
+
+garch_beta <-function(returns) {
+  
+  mod_specify = ugarchspec(mean.model = list(armaOrder =c(1,0)), variance.model = list(model = "sGARCH",garchOrder=c(1,1)),distribution.model = "norm")
+  mod_fit = ugarchfit(data = returns, spec = mod_specify, out.sample =20)
+  as.list(coef(mod_fit)[5])
+}
+
+
+```
+
+
+
+## GARCH-Model
+```{r}
+# na_count <-sapply(daily_data_var, function(y) sum(length(which(is.na(y)))))
+# na_count
+
+## Fitting THE MODEL, receiving 
+fitGARCHAndPredict <- function(daily_data) {
+  fitted_garch_model <- daily_data %>%
+          arrange(DATE) %>%
+          group_by(CUSIP) %>%
+          filter(sum(!is.na(RET)) > 120) %>%
+          summarise(alpha1 = garch_alpha(RET),
+                    beta1 = garch_beta(RET),
+                    omega1 = garch_omega(RET))
+
+
+  daily_predicted_vol <- daily_data %>%
+            inner_join(fitted_garch_model) %>%
+            arrange(DATE) %>%
+            group_by(CUSIP) %>%
+            drop_na() %>%
+            mutate(alpha1 = as.numeric(alpha1),
+                  beta1 = as.numeric(beta1),
+                  omega1 = as.numeric(omega1),
+                  curr_vol = rollify(volatility,100)(RET),
+                  vol_predicted = omega1 + alpha1*lag(curr_vol) + beta1*lag(RET)*lag(RET),
+                  vol_predicted = vol_predicted*sqrt(252)) %>%  ## Converting to annualized volatility
+            select(c(DATE,CUSIP,vol_predicted))
+}
+
+daily_predicted_vol <- fitGARCHAndPredict(daily_data)
+daily_predicted_vol_2010 <- fitGARCHAndPredict(daily_data_2010)
+
+plotForSelectedCompanies(daily_predicted_vol, selected_companies)
+plotForSelectedCompanies(daily_predicted_vol_2010, selected_companies_2010)
+
+```
+
+
